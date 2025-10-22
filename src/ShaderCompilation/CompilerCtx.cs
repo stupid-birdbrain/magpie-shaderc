@@ -54,6 +54,7 @@ public enum IncludeType {
 public unsafe struct CompilerCtx : IDisposable {
     private nint _compilerHandle;
     public Options _options;
+    private spvc_context _spvc;
 
     public CompilerCtx() {
         _compilerHandle = shaderc.shaderc_compiler_initialize();
@@ -62,6 +63,14 @@ public unsafe struct CompilerCtx : IDisposable {
         }
 
         _options = new Options();
+        SpirvCrossApi.spvc_context_create(out _spvc).CheckResult();
+        SpirvCrossApi.spvc_context_set_error_callback(_spvc, &SpirvCrossErrorCallback, default);
+    }
+    
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static void SpirvCrossErrorCallback(nint userData, sbyte* error) {
+        throw new Exception($"SPIRV-Cross error: {new string(error)}");
     }
 
     public CompileResult Compile(string source, ShaderKind kind, string inputFileName, string entryPoint) {
@@ -95,8 +104,100 @@ public unsafe struct CompilerCtx : IDisposable {
             shaderc.shaderc_compiler_release(_compilerHandle);
             _compilerHandle = IntPtr.Zero;
         }
+        if (_spvc != IntPtr.Zero)
+        {
+            SpirvCrossApi.spvc_context_destroy(_spvc);
+            _spvc = IntPtr.Zero;
+        }
     }
+    
+    public ReflectedShaderData AttemptSPVReflect(byte[] spirvBytes, Backend backend) {
+        spvc_context context = default;
+        spvc_parsed_ir parsedIr = default;
+        spvc_compiler compiler = default;
+        spvc_compiler_options options = default;
+        string reflectedCode = string.Empty;
 
+        try {
+            SpirvCrossApi.spvc_context_create(out context).CheckResult();
+            SpirvCrossApi.spvc_context_set_error_callback(context, &SpirvCrossErrorCallback, IntPtr.Zero);
+
+            fixed (byte* spirvPtr = spirvBytes) {
+                SpirvCrossApi.spvc_context_parse_spirv(context, (uint*)spirvPtr, (nuint)spirvBytes.Length / sizeof(uint), out parsedIr).CheckResult();
+            }
+
+            SpirvCrossApi.spvc_context_create_compiler(context, backend, parsedIr, CaptureMode.TakeOwnership, out compiler).CheckResult();
+            SpirvCrossApi.spvc_compiler_create_compiler_options(compiler, out options).CheckResult();
+
+            if (backend == Backend.GLSL) {
+                SpirvCrossApi.spvc_compiler_options_set_uint(options, CompilerOption.GLSLVersion, 460).CheckResult();
+                SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLES, SpvcBool.False).CheckResult();
+                SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLVulkanSemantics, SpvcBool.True).CheckResult();
+                SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLEmitUniformBufferAsPlainUniforms, SpvcBool.False).CheckResult(); // Usually False for desktop GLSL
+            }
+            else if (backend == Backend.HLSL) {
+                SpirvCrossApi.spvc_compiler_options_set_uint(options, CompilerOption.HLSLShaderModel, 61).CheckResult();
+            }
+
+            SpirvCrossApi.spvc_compiler_install_compiler_options(compiler, options).CheckResult();
+
+            byte* codePtr;
+            SpirvCrossApi.spvc_compiler_compile(compiler, &codePtr).CheckResult();
+            reflectedCode = Marshal.PtrToStringAnsi((IntPtr)codePtr) ?? string.Empty;
+
+            ReflectedShaderData data = new();
+            data.Code = spirvBytes;
+            data.ReflectedCode = reflectedCode;
+
+            spvc_entry_point* entryPointsPtr;
+            nuint numEntryPoints;
+            SpirvCrossApi.spvc_compiler_get_entry_points(compiler, &entryPointsPtr, &numEntryPoints).CheckResult();
+            if (numEntryPoints > 0) {
+                data.EntryPoint = Marshal.PtrToStringAnsi((IntPtr)entryPointsPtr[0].name) ?? "unknown";
+            }
+            else {
+                data.EntryPoint = "none";//
+            }
+            
+            spvc_resources resources;
+            SpirvCrossApi.spvc_compiler_create_shader_resources(compiler, out resources).CheckResult();
+
+            spvc_reflected_resource* resourceListPtr;
+            nuint resourceCount;
+
+            SpirvCrossApi.spvc_resources_get_resource_list_for_type(resources, ResourceType.UniformBuffer, &resourceListPtr, &resourceCount).CheckResult();
+            data.UniformBuffers = (uint)resourceCount;
+
+            SpirvCrossApi.spvc_resources_get_resource_list_for_type(resources, ResourceType.SampledImage, &resourceListPtr, &resourceCount).CheckResult();
+            data.Samplers = (uint)resourceCount;
+            
+            SpirvCrossApi.spvc_resources_get_resource_list_for_type(resources, ResourceType.SeparateSamplers, &resourceListPtr, &resourceCount).CheckResult();
+            data.Samplers += (uint)resourceCount;
+
+            SpirvCrossApi.spvc_resources_get_resource_list_for_type(resources, ResourceType.StorageBuffer, &resourceListPtr, &resourceCount).CheckResult();
+            data.StorageBuffers = (uint)resourceCount;
+
+            SpirvCrossApi.spvc_resources_get_resource_list_for_type(resources, ResourceType.StorageImage, &resourceListPtr, &resourceCount).CheckResult();
+            data.StorageImages = (uint)resourceCount;
+
+            return data;
+        }
+        catch (Exception e) {
+            string errorMessage = $"spv reflection failed: {e.Message}";
+            var lastError = SpirvCrossApi.spvc_context_get_last_error_string(context);
+            if (!string.IsNullOrEmpty(lastError)) {
+                errorMessage += $"\n spv last error: {lastError}";
+            }
+            throw new Exception(errorMessage, e);
+        }
+        finally {
+            if (context.IsNull) {
+                SpirvCrossApi.spvc_context_release_allocations(context);
+                SpirvCrossApi.spvc_context_destroy(context);
+            }
+        }
+    }
+    
     public unsafe struct Options : IDisposable {
         public readonly nint Handle;
 
