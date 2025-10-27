@@ -1,11 +1,7 @@
-﻿using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Runtime.CompilerServices;
+﻿using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using Vortice.SpirvCross;
-using Vortice.Vulkan;
 
 namespace ShaderCompilation;
 
@@ -64,7 +60,7 @@ public unsafe struct CompilerCtx : IDisposable {
 
         _options = new Options();
         SpirvCrossApi.spvc_context_create(out _spvc).CheckResult();
-        SpirvCrossApi.spvc_context_set_error_callback(_spvc, &SpirvCrossErrorCallback, default);
+        SpirvCrossApi.spvc_context_set_error_callback(_spvc, &SpirvCrossErrorCallback, 0);
     }
     
 
@@ -111,29 +107,30 @@ public unsafe struct CompilerCtx : IDisposable {
         }
     }
     
-    public ReflectedShaderData AttemptSPVReflect(byte[] spirvBytes, Backend backend) {
+    public ReflectedShaderData AttemptSpvReflect(byte[] spirvBytes, Backend backend) {
         spvc_context context = default;
-        spvc_parsed_ir parsedIr = default;
-        spvc_compiler compiler = default;
-        spvc_compiler_options options = default;
-        string reflectedCode = string.Empty;
 
         try {
             SpirvCrossApi.spvc_context_create(out context).CheckResult();
             SpirvCrossApi.spvc_context_set_error_callback(context, &SpirvCrossErrorCallback, IntPtr.Zero);
 
+            spvc_parsed_ir parsedIr;
             fixed (byte* spirvPtr = spirvBytes) {
-                SpirvCrossApi.spvc_context_parse_spirv(context, (uint*)spirvPtr, (nuint)spirvBytes.Length / sizeof(uint), out parsedIr).CheckResult();
+                if (spirvBytes.Length % sizeof(uint) != 0) {
+                    throw new Exception("spvc bytecode length is not a multiple of 4 bytes (uint).");
+                }
+                nuint wordCount = (nuint)spirvBytes.Length / sizeof(uint);
+                SpirvCrossApi.spvc_context_parse_spirv(context, (uint*)spirvPtr, wordCount, out parsedIr).CheckResult();
             }
 
-            SpirvCrossApi.spvc_context_create_compiler(context, backend, parsedIr, CaptureMode.TakeOwnership, out compiler).CheckResult();
-            SpirvCrossApi.spvc_compiler_create_compiler_options(compiler, out options).CheckResult();
+            SpirvCrossApi.spvc_context_create_compiler(context, backend, parsedIr, CaptureMode.TakeOwnership, out spvc_compiler compiler).CheckResult();
+            SpirvCrossApi.spvc_compiler_create_compiler_options(compiler, out spvc_compiler_options options).CheckResult();
 
             if (backend == Backend.GLSL) {
                 SpirvCrossApi.spvc_compiler_options_set_uint(options, CompilerOption.GLSLVersion, 460).CheckResult();
                 SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLES, SpvcBool.False).CheckResult();
                 SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLVulkanSemantics, SpvcBool.True).CheckResult();
-                SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLEmitUniformBufferAsPlainUniforms, SpvcBool.False).CheckResult(); // Usually False for desktop GLSL
+                SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLEmitUniformBufferAsPlainUniforms, SpvcBool.False).CheckResult();
             }
             else if (backend == Backend.HLSL) {
                 SpirvCrossApi.spvc_compiler_options_set_uint(options, CompilerOption.HLSLShaderModel, 61).CheckResult();
@@ -143,11 +140,9 @@ public unsafe struct CompilerCtx : IDisposable {
 
             byte* codePtr;
             SpirvCrossApi.spvc_compiler_compile(compiler, &codePtr).CheckResult();
-            reflectedCode = Marshal.PtrToStringAnsi((IntPtr)codePtr) ?? string.Empty;
+            string reflectedCode = Marshal.PtrToStringAnsi((IntPtr)codePtr) ?? string.Empty;
 
-            ReflectedShaderData data = new();
-            data.Code = spirvBytes;
-            data.ReflectedCode = reflectedCode;
+            ReflectedShaderData data = new() { Code = spirvBytes, ReflectedCode = reflectedCode };
 
             spvc_entry_point* entryPointsPtr;
             nuint numEntryPoints;
@@ -156,11 +151,10 @@ public unsafe struct CompilerCtx : IDisposable {
                 data.EntryPoint = Marshal.PtrToStringAnsi((IntPtr)entryPointsPtr[0].name) ?? "unknown";
             }
             else {
-                data.EntryPoint = "none";//
+                data.EntryPoint = "none";
             }
-            
-            spvc_resources resources;
-            SpirvCrossApi.spvc_compiler_create_shader_resources(compiler, out resources).CheckResult();
+
+            SpirvCrossApi.spvc_compiler_create_shader_resources(compiler, out var resources).CheckResult();
 
             spvc_reflected_resource* resourceListPtr;
             nuint resourceCount;
@@ -191,10 +185,10 @@ public unsafe struct CompilerCtx : IDisposable {
             throw new Exception(errorMessage, e);
         }
         finally {
-            if (context.IsNull) {
-                SpirvCrossApi.spvc_context_release_allocations(context);
-                SpirvCrossApi.spvc_context_destroy(context);
-            }
+            // if (!context.IsNull) {
+            //     SpirvCrossApi.spvc_context_release_allocations(context);
+            //     SpirvCrossApi.spvc_context_destroy(context);
+            // }
         }
     }
     
@@ -247,9 +241,9 @@ public unsafe struct CompilerCtx : IDisposable {
                 shaderc.shaderc_compile_options_set_generate_debug_info(Handle);
         }
 
-        private nint IncludeResolveCallback(nint user_data, byte* requested_source, int type, byte* requesting_source, nuint include_depth) {
-            string requestedSourceStr = Marshal.PtrToStringAnsi((IntPtr)requested_source) ?? string.Empty;
-            string requestingSourceStr = Marshal.PtrToStringAnsi((IntPtr)requesting_source) ?? string.Empty;
+        private nint IncludeResolveCallback(nint userData, byte* requestedSource, int type, byte* requestingSource, nuint includeDepth) {
+            string requestedSourceStr = Marshal.PtrToStringAnsi((IntPtr)requestedSource) ?? string.Empty;
+            string requestingSourceStr = Marshal.PtrToStringAnsi((IntPtr)requestingSource) ?? string.Empty;
             IncludeType includeType = (IncludeType)type;
 
             IncludeResult managedResult;
@@ -277,8 +271,8 @@ public unsafe struct CompilerCtx : IDisposable {
             return managedResult.Alloc();
         }
 
-        private void IncludeReleaseCallback(nint user_data, nint include_result_ptr) {
-            IncludeResult.Free(include_result_ptr);
+        private void IncludeReleaseCallback(nint userData, nint includeResultPtr) {
+            IncludeResult.Free(includeResultPtr);
         }
     }
 
@@ -358,7 +352,7 @@ public unsafe struct CompilerCtx : IDisposable {
             }
         }
         
-        public ReadOnlySpan<byte> GetSPVBytes() {
+        public ReadOnlySpan<byte> GetSpvBytes() {
             if (_ptr == IntPtr.Zero) return ReadOnlySpan<byte>.Empty;
             nuint size = shaderc.shaderc_result_get_length(_ptr);
             if (size == 0) return ReadOnlySpan<byte>.Empty;
@@ -366,9 +360,15 @@ public unsafe struct CompilerCtx : IDisposable {
             void* nativeBuf = shaderc.shaderc_result_get_bytes(_ptr);
             return new ReadOnlySpan<byte>(nativeBuf, (int)size);
         }
+        
+        public byte[] GetBytesCopy() {
+            var span = GetSpvBytes();
+            if (span.IsEmpty) return Array.Empty<byte>();
+            return span.ToArray();
+        }
 
         public string GetString() {
-            var bytes = GetSPVBytes();
+            var bytes = GetSpvBytes();
             if (bytes.Length == 0 && ErrorMessage == string.Empty) return string.Empty;
 
             if (bytes.Length > 0) return Encoding.ASCII.GetString(bytes);
