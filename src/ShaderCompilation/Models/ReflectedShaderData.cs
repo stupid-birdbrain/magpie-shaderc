@@ -11,9 +11,8 @@ public struct ReflectedShaderData {
 
     private byte[] _bytes;
     public ReadOnlySpan<byte> Bytes => _bytes.AsSpan();
-    
-    private ReflectedSampler[] _samplers;
-    //public ReadOnlySpan<byte> Samplers => _samplers.AsSpan();
+
+    public IReadOnlyList<ReflectedSampler> ReadSamplers;
 
     public override string ToString() {
         return $"entry: {EntryPoint}\n" +

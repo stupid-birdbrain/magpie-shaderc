@@ -16,11 +16,16 @@ public enum ShaderDataType {
     Bool,
     Matrix2x2,
     Matrix3x3,
-    Matrix4x4
+    Matrix4x4,
+    
+    Image2D,
+    Sampler2D,
+    
+    Struct
 }
 
 public class DataTypeExt {
-    public static ShaderDataType SpvTypeToDataType(Basetype basetype, uint vectorSize, uint columns) {
+    public static ShaderDataType SpvTypeToDataType(Basetype basetype, uint vectorSize, uint columns, uint arraySize = 1) {
         // its a matrix!
         if (columns > 1) {
             switch (columns) {
@@ -61,6 +66,11 @@ public class DataTypeExt {
                 _ => ShaderDataType.Unknown
             },
             Basetype.Boolean => vectorSize == 1 ? ShaderDataType.Bool : ShaderDataType.Unknown,
+            
+            Basetype.SampledImage => ShaderDataType.Sampler2D,
+            Basetype.Image => ShaderDataType.Image2D,
+            Basetype.Struct => ShaderDataType.Struct,
+            
             _ => ShaderDataType.Unknown
         };
     }

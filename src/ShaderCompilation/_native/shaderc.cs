@@ -3,8 +3,8 @@
 namespace ShaderCompilation;
 
 #pragma warning disable CS8981 // The type name only contains lower-cased ascii characters. Such names may become reserved for the language.
+// ReSharper disable once InconsistentNaming
 internal unsafe partial struct shaderc {
-#pragma warning restore CS8981 // The type name only contains lower-cased ascii characters. Such names may become reserved for the language.
     [LibraryImport("shaderc_shared", EntryPoint = "shaderc_compiler_initialize")]
     internal static partial nint shaderc_compiler_initialize();
 
@@ -14,12 +14,12 @@ internal unsafe partial struct shaderc {
     [LibraryImport("shaderc_shared", EntryPoint = "shaderc_compile_into_spv")]
     internal static partial nint shaderc_compile_into_spv(
         nint compiler,
-        byte* source_text,
-        nuint source_text_size,
-        int shader_kind,
-        byte* input_file_name,
-        byte* entry_point_name,
-        nint additional_options
+        byte* sourceText,
+        nuint sourceTextSize,
+        int shaderKind,
+        byte* inputFileName,
+        byte* entryPointName,
+        nint additionalOptions
     );
 
     [LibraryImport("shaderc_shared", EntryPoint = "shaderc_result_get_length")]
@@ -108,3 +108,4 @@ public enum Status {
     TransformationError = 7,
     ConfigurationError = 8
 }
+#pragma warning restore CS8981 // The type name only contains lower-cased ascii characters. Such names may become reserved for the language.

@@ -2,7 +2,9 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
+using Vortice.SPIRV;
 using Vortice.SpirvCross;
+using Vortice.Vulkan;
 
 namespace ShaderCompilation;
 
@@ -50,8 +52,12 @@ public enum IncludeType {
 
 public unsafe struct CompilerCtx : IDisposable {
     private nint _compilerHandle;
-    public Options _options;
     private spvc_context _spvc;
+    
+    public CompilerOptions Options;
+
+    private spvc_compiler _compiler;
+    private spvc_resources _resources;
 
     public CompilerCtx() {
         _compilerHandle = shaderc.shaderc_compiler_initialize();
@@ -59,7 +65,7 @@ public unsafe struct CompilerCtx : IDisposable {
             throw new Exception("failed to initialize shaderc ctx.");
         }
 
-        _options = new Options();
+        Options = new CompilerOptions();
         SpirvCrossApi.spvc_context_create(out _spvc).CheckResult();
         SpirvCrossApi.spvc_context_set_error_callback(_spvc, &SpirvCrossErrorCallback, 0);
     }
@@ -83,7 +89,7 @@ public unsafe struct CompilerCtx : IDisposable {
                 (int)kind,
                 (byte*)inputPtr,
                 (byte*)entryPointPtr,
-                _options.Handle
+                Options.Handle
             );
             return new CompileResult(resultPtr);
         }
@@ -91,20 +97,6 @@ public unsafe struct CompilerCtx : IDisposable {
             Marshal.FreeHGlobal(srcPtr);
             Marshal.FreeHGlobal(inputPtr);
             Marshal.FreeHGlobal(entryPointPtr);
-        }
-    }
-
-    public void Dispose() {
-        _options.Dispose();
-        if (_compilerHandle != IntPtr.Zero)
-        {
-            shaderc.shaderc_compiler_release(_compilerHandle);
-            _compilerHandle = IntPtr.Zero;
-        }
-        if (_spvc != IntPtr.Zero)
-        {
-            SpirvCrossApi.spvc_context_destroy(_spvc);
-            _spvc = IntPtr.Zero;
         }
     }
     
@@ -129,9 +121,9 @@ public unsafe struct CompilerCtx : IDisposable {
 
             if (backend == Backend.GLSL) {
                 SpirvCrossApi.spvc_compiler_options_set_uint(options, CompilerOption.GLSLVersion, 460).CheckResult();
-                SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLES, SpvcBool.False).CheckResult();
-                SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLVulkanSemantics, SpvcBool.True).CheckResult();
-                SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLEmitUniformBufferAsPlainUniforms, SpvcBool.False).CheckResult();
+                SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLES, false).CheckResult();
+                SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLVulkanSemantics, true).CheckResult();
+                SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLEmitUniformBufferAsPlainUniforms, false).CheckResult();
             }
             else if (backend == Backend.HLSL) {
                 SpirvCrossApi.spvc_compiler_options_set_uint(options, CompilerOption.HLSLShaderModel, 61).CheckResult();
@@ -148,6 +140,7 @@ public unsafe struct CompilerCtx : IDisposable {
             spvc_entry_point* entryPointsPtr;
             nuint numEntryPoints;
             SpirvCrossApi.spvc_compiler_get_entry_points(compiler, &entryPointsPtr, &numEntryPoints).CheckResult();
+            
             if (numEntryPoints > 0) {
                 data.EntryPoint = Marshal.PtrToStringAnsi((IntPtr)entryPointsPtr[0].name) ?? "unknown";
             }
@@ -159,21 +152,22 @@ public unsafe struct CompilerCtx : IDisposable {
 
             spvc_reflected_resource* resourceListPtr;
             nuint resourceCount;
+            
+            List<ReflectedSampler> samplers = new();
 
             SpirvCrossApi.spvc_resources_get_resource_list_for_type(resources, ResourceType.UniformBuffer, &resourceListPtr, &resourceCount).CheckResult();
             data.UniformBuffers = (uint)resourceCount;
 
             SpirvCrossApi.spvc_resources_get_resource_list_for_type(resources, ResourceType.SampledImage, &resourceListPtr, &resourceCount).CheckResult();
-            data.Samplers = (uint)resourceCount;
-            
-            SpirvCrossApi.spvc_resources_get_resource_list_for_type(resources, ResourceType.SeparateSamplers, &resourceListPtr, &resourceCount).CheckResult();
-            data.Samplers += (uint)resourceCount;
-
-            SpirvCrossApi.spvc_resources_get_resource_list_for_type(resources, ResourceType.StorageBuffer, &resourceListPtr, &resourceCount).CheckResult();
-            data.StorageBuffers = (uint)resourceCount;
-
-            SpirvCrossApi.spvc_resources_get_resource_list_for_type(resources, ResourceType.StorageImage, &resourceListPtr, &resourceCount).CheckResult();
-            data.StorageImages = (uint)resourceCount;
+            for (int i = 0; i < (int)resourceCount; i++) {
+                var resource = resourceListPtr[i];
+                var name = Marshal.PtrToStringAnsi((IntPtr)resource.name) ?? "unnamed";
+                uint set = SpirvCrossApi.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.DescriptorSet);
+                uint binding = SpirvCrossApi.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.Binding);
+                
+                samplers.Add(new ReflectedSampler(name, binding, set, ShaderDataType.Sampler2D));
+            }
+            data.ReadSamplers = samplers;
 
             return data;
         }
@@ -185,206 +179,35 @@ public unsafe struct CompilerCtx : IDisposable {
             }
             throw new Exception(errorMessage, e);
         }
-        finally {
-            // if (!context.IsNull) {
-            //     SpirvCrossApi.spvc_context_release_allocations(context);
-            //     SpirvCrossApi.spvc_context_destroy(context);
-            // }
+    }
+
+    void ReadSamplers(List<ReflectedSampler> samplers) {
+        
+    }
+    
+    public void Dispose() {
+        Options.Dispose();
+        if (_compilerHandle != IntPtr.Zero)
+        {
+            shaderc.shaderc_compiler_release(_compilerHandle);
+            _compilerHandle = IntPtr.Zero;
+        }
+        if (_spvc != IntPtr.Zero)
+        {
+            SpirvCrossApi.spvc_context_destroy(_spvc);
+            _spvc = IntPtr.Zero;
         }
     }
     
-    public unsafe struct Options : IDisposable {
-        public readonly nint Handle;
-
-        private shaderc.IncludeResolveFn _includeResolveDelegate;
-        private shaderc.IncludeReleaseFn _includeReleaseDelegate;
-
-        public delegate IncludeResult IncludeHandler(string requestedSource, string requestingSource, IncludeType type);
-        public IncludeHandler? CustomIncludeHandler { get; set; }
-
-        public Options() {
-            Handle = shaderc.shaderc_compile_options_initialize();
-            if (Handle == IntPtr.Zero) {
-                throw new Exception("failed to initialize shaderc ctx options.");
-            }
-
-            _includeResolveDelegate = IncludeResolveCallback;
-            _includeReleaseDelegate = IncludeReleaseCallback;
-            
-            shaderc.shaderc_compile_options_set_include_callbacks(
-                Handle,
-                _includeResolveDelegate,
-                _includeReleaseDelegate,
-                IntPtr.Zero
-            );
-        }
-
-        public void Dispose() {
-            if (Handle != IntPtr.Zero) {
-                shaderc.shaderc_compile_options_release(Handle);
-            }
-        }
-
-        public void SetSourceLanguage(LangKind lang) =>
-            shaderc.shaderc_compile_options_set_source_language(Handle, (int)lang);
-
-        public void SetOptimizationLevel(OptimizationLevel level) =>
-            shaderc.shaderc_compile_options_set_optimization_level(Handle, (int)level);
-
-        public void SetTargetEnv(TargetEnv env, uint version) =>
-            shaderc.shaderc_compile_options_set_target_env(Handle, (int)env, version);
-
-        public void SetTargetSpirv(SpirvVersion version) =>
-            shaderc.shaderc_compile_options_set_target_spirv(Handle, (uint)version);
-
-        public void SetGenerateDebugInfo(bool generateDebugInfo) {
-            if (generateDebugInfo)
-                shaderc.shaderc_compile_options_set_generate_debug_info(Handle);
-        }
-
-        private nint IncludeResolveCallback(nint userData, byte* requestedSource, int type, byte* requestingSource, nuint includeDepth) {
-            string requestedSourceStr = Marshal.PtrToStringAnsi((IntPtr)requestedSource) ?? string.Empty;
-            string requestingSourceStr = Marshal.PtrToStringAnsi((IntPtr)requestingSource) ?? string.Empty;
-            IncludeType includeType = (IncludeType)type;
-
-            IncludeResult managedResult;
-            try {
-                if (CustomIncludeHandler != null) {
-                    managedResult = CustomIncludeHandler.Invoke(requestedSourceStr, requestingSourceStr, includeType);
-                }
-                else
-                {
-                    managedResult = new IncludeResult(
-                        requestedSourceStr,
-                        $"cannot resolve include '{requestedSourceStr}'. no include handler specified or handler failed.",
-                        isError: true
-                    );
-                }
-            }
-            catch (Exception ex) {
-                managedResult = new IncludeResult(
-                    requestedSourceStr,
-                    $"error in include handler for '{requestedSourceStr}': {ex.Message}",
-                    isError: true
-                );
-            }
-
-            return managedResult.Alloc();
-        }
-
-        private void IncludeReleaseCallback(nint userData, nint includeResultPtr) {
-            IncludeResult.Free(includeResultPtr);
-        }
-    }
-
-    public struct IncludeResult : IDisposable {
-        private IntPtr _sourceNamePtr = IntPtr.Zero;
-        private IntPtr _contentPtr = IntPtr.Zero;
-        private IntPtr _nativeStructPtr = IntPtr.Zero;
-
-        public string SourceName { get; }
-        public string Content { get; }
-        public string ErrorMessage { get; }
-
-        public IncludeResult(string sourceName, string content) {
-            SourceName = sourceName;
-            Content = content;
-            ErrorMessage = string.Empty;
-        }
-
-        public IncludeResult(string sourceName, string errorMessage, bool isError = true) {
-            SourceName = sourceName;
-            Content = string.Empty;
-            ErrorMessage = errorMessage;
-        }
-
-        internal nint Alloc() {
-            Dispose();
-
-            _sourceNamePtr = Marshal.StringToHGlobalAnsi(SourceName);
-            _contentPtr = Marshal.StringToHGlobalAnsi(Content);
-
-            var nativeResult = new shaderc.IncludeResultNative {
-                source_name = _sourceNamePtr,
-                source_name_length = (nuint)SourceName.Length,
-                content = _contentPtr,
-                content_length = (nuint)Content.Length,
-                user_data = IntPtr.Zero
-            };
-
-            _nativeStructPtr = Marshal.AllocHGlobal(Marshal.SizeOf<shaderc.IncludeResultNative>());
-            Marshal.StructureToPtr(nativeResult, _nativeStructPtr, false);
-
-            return _nativeStructPtr;
-        }
-
-        internal static void Free(nint nativeResultPtr) {
-            if (nativeResultPtr == IntPtr.Zero) return;
-
-            var nativeResult = Marshal.PtrToStructure<shaderc.IncludeResultNative>(nativeResultPtr);
-
-            if (nativeResult.source_name != IntPtr.Zero) Marshal.FreeHGlobal(nativeResult.source_name);
-            if (nativeResult.content != IntPtr.Zero) Marshal.FreeHGlobal(nativeResult.content);
-
-            Marshal.FreeHGlobal(nativeResultPtr);
-        }
-
-        public void Dispose() {
-            _sourceNamePtr = IntPtr.Zero;
-            _contentPtr = IntPtr.Zero;
-            _nativeStructPtr = IntPtr.Zero;
-        }
-    }
-
-    public readonly unsafe struct CompileResult : IDisposable {
-        private readonly nint _ptr;
-
-        internal nint Handle => _ptr;
-
-        public readonly ulong NumWarnings => _ptr == IntPtr.Zero ? 0 : shaderc.shaderc_result_get_num_warnings(_ptr);
-        public readonly ulong NumErrors => _ptr == IntPtr.Zero ? 0 : shaderc.shaderc_result_get_num_errors(_ptr);
-        public readonly Status CompilationStatus => _ptr == IntPtr.Zero ? Status.InternalError : shaderc.shaderc_result_get_compilation_status(_ptr);
-
-        public string ErrorMessage {
-            get {
-                if (_ptr == IntPtr.Zero) return "result is null!";
-                var errorPtr = shaderc.shaderc_result_get_error_message(_ptr);
-                return Marshal.PtrToStringAnsi(errorPtr) ?? string.Empty;
-            }
-        }
-        
-        public ReadOnlySpan<byte> GetSpvBytes() {
-            if (_ptr == IntPtr.Zero) return ReadOnlySpan<byte>.Empty;
-            nuint size = shaderc.shaderc_result_get_length(_ptr);
-            if (size == 0) return ReadOnlySpan<byte>.Empty;
-
-            void* nativeBuf = shaderc.shaderc_result_get_bytes(_ptr);
-            return new ReadOnlySpan<byte>(nativeBuf, (int)size);
-        }
-        
-        public byte[] GetBytesCopy() {
-            var span = GetSpvBytes();
-            if (span.IsEmpty) return Array.Empty<byte>();
-            return span.ToArray();
-        }
-
-        public string GetString() {
-            var bytes = GetSpvBytes();
-            if (bytes.Length == 0 && ErrorMessage == string.Empty) return string.Empty;
-
-            if (bytes.Length > 0) return Encoding.ASCII.GetString(bytes);
-
-            return ErrorMessage;
-        }
-
-        internal CompileResult(nint handle) {
-            _ptr = handle;
-        }
-
-        public void Dispose() {
-            if (_ptr != IntPtr.Zero) {
-                shaderc.shaderc_result_release(_ptr);
-            }
-        }
+    private VkShaderStageFlags ConvertSpvExecutionModelToVkShaderStageFlags(SpvExecutionModel model) {
+        return model switch {
+            SpvExecutionModel.Vertex => VkShaderStageFlags.Vertex,
+            SpvExecutionModel.Fragment => VkShaderStageFlags.Fragment,
+            SpvExecutionModel.GLCompute => VkShaderStageFlags.Compute,
+            SpvExecutionModel.Geometry => VkShaderStageFlags.Geometry,
+            SpvExecutionModel.TessellationControl => VkShaderStageFlags.TessellationControl,
+            SpvExecutionModel.TessellationEvaluation => VkShaderStageFlags.TessellationEvaluation,
+            _ => VkShaderStageFlags.None,
+        };
     }
 }
