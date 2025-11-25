@@ -1,6 +1,6 @@
-﻿namespace ShaderCompilation;
+﻿namespace ShaderCompilation.Models;
 
-public struct ReflectedShaderData() {
+public struct ReflectedShaderData {
     public uint Samplers;
     public uint StorageBuffers;
     public uint StorageImages;
@@ -8,6 +8,12 @@ public struct ReflectedShaderData() {
     public string EntryPoint;
     public byte[] Code;
     public string ReflectedCode;
+
+    private byte[] _bytes;
+    public ReadOnlySpan<byte> Bytes => _bytes.AsSpan();
+    
+    private ReflectedSampler[] _samplers;
+    //public ReadOnlySpan<byte> Samplers => _samplers.AsSpan();
 
     public override string ToString() {
         return $"entry: {EntryPoint}\n" +
