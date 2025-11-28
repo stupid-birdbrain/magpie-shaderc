@@ -4,7 +4,7 @@ namespace ShaderCompilation;
 
 #pragma warning disable CS8981 // The type name only contains lower-cased ascii characters. Such names may become reserved for the language.
 // ReSharper disable once InconsistentNaming
-internal unsafe partial struct shaderc {
+internal unsafe partial class shaderc {
     [LibraryImport("shaderc_shared", EntryPoint = "shaderc_compiler_initialize")]
     internal static partial nint shaderc_compiler_initialize();
 

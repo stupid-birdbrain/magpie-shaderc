@@ -21,11 +21,6 @@ public enum ShaderKind {
     TessEvaluation = 5,
 }
 
-public enum IncludeType {
-    Relative = 0,
-    Absolute = 1
-}
-
 public unsafe class CompilerCtx : IDisposable {
     private nint _compilerHandle;
     private spvc_context _spvc;
