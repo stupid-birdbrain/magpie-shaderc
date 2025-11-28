@@ -1,7 +1,6 @@
 ﻿using ShaderCompilation.Models;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Text;
 using Vortice.SPIRV;
 using Vortice.SpirvCross;
 using Vortice.Vulkan;
@@ -11,29 +10,6 @@ namespace ShaderCompilation;
 public enum LangKind {
     Glsl = 0,
     Hlsl = 1
-}
-
-public enum OptimizationLevel {
-    None = 0,
-    Size = 1,
-    Performance = 2,
-}
-
-public enum TargetEnv {
-    Vulkan = 0,
-    OpenGL = 1,
-    OpenGL_Compat = 2,
-    D3D12 = 4,
-}
-
-public enum SpirvVersion {
-    Spirv10 = 0x00010000,
-    Spirv11 = 0x00010100,
-    Spirv12 = 0x00010200,
-    Spirv13 = 0x00010300,
-    Spirv14 = 0x00010400,
-    Spirv15 = 0x00010500,
-    Spirv16 = 0x00010600,
 }
 
 public enum ShaderKind {
@@ -50,26 +26,27 @@ public enum IncludeType {
     Absolute = 1
 }
 
-public unsafe struct CompilerCtx : IDisposable {
+public unsafe class CompilerCtx : IDisposable {
     private nint _compilerHandle;
     private spvc_context _spvc;
     
     public CompilerOptions Options;
 
     private spvc_compiler _compiler;
-    private spvc_resources _resources;
 
-    public CompilerCtx() {
+    private readonly Backend _backend;
+
+    public CompilerCtx(Backend backend) {
         _compilerHandle = shaderc.shaderc_compiler_initialize();
         if (_compilerHandle == IntPtr.Zero) {
             throw new Exception("failed to initialize shaderc ctx.");
         }
-
+        
+        _backend = backend;
         Options = new CompilerOptions();
         SpirvCrossApi.spvc_context_create(out _spvc).CheckResult();
         SpirvCrossApi.spvc_context_set_error_callback(_spvc, &SpirvCrossErrorCallback, 0);
     }
-    
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     private static void SpirvCrossErrorCallback(nint userData, sbyte* error) {
@@ -100,32 +77,27 @@ public unsafe struct CompilerCtx : IDisposable {
         }
     }
     
-    public ReflectedShaderData AttemptSpvReflect(byte[] spirvBytes, Backend backend) {
-        spvc_context context = default;
-
+    public ReflectedShaderData AttemptSpvReflect(byte[] spirvBytes) {
         try {
-            SpirvCrossApi.spvc_context_create(out context).CheckResult();
-            SpirvCrossApi.spvc_context_set_error_callback(context, &SpirvCrossErrorCallback, IntPtr.Zero);
-
             spvc_parsed_ir parsedIr;
             fixed (byte* spirvPtr = spirvBytes) {
                 if (spirvBytes.Length % sizeof(uint) != 0) {
                     throw new Exception("spvc bytecode length is not a multiple of 4 bytes (uint).");
                 }
                 nuint wordCount = (nuint)spirvBytes.Length / sizeof(uint);
-                SpirvCrossApi.spvc_context_parse_spirv(context, (uint*)spirvPtr, wordCount, out parsedIr).CheckResult();
+                SpirvCrossApi.spvc_context_parse_spirv(_spvc, (uint*)spirvPtr, wordCount, out parsedIr).CheckResult();
             }
 
-            SpirvCrossApi.spvc_context_create_compiler(context, backend, parsedIr, CaptureMode.TakeOwnership, out spvc_compiler compiler).CheckResult();
+            SpirvCrossApi.spvc_context_create_compiler(_spvc, _backend, parsedIr, CaptureMode.TakeOwnership, out spvc_compiler compiler).CheckResult();
             SpirvCrossApi.spvc_compiler_create_compiler_options(compiler, out spvc_compiler_options options).CheckResult();
 
-            if (backend == Backend.GLSL) {
+            if (_backend == Backend.GLSL) {
                 SpirvCrossApi.spvc_compiler_options_set_uint(options, CompilerOption.GLSLVersion, 460).CheckResult();
                 SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLES, false).CheckResult();
                 SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLVulkanSemantics, true).CheckResult();
                 SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLEmitUniformBufferAsPlainUniforms, false).CheckResult();
             }
-            else if (backend == Backend.HLSL) {
+            else if (_backend == Backend.HLSL) {
                 SpirvCrossApi.spvc_compiler_options_set_uint(options, CompilerOption.HLSLShaderModel, 61).CheckResult();
             }
 
@@ -147,7 +119,7 @@ public unsafe struct CompilerCtx : IDisposable {
             else {
                 data.EntryPoint = "none";
             }
-
+            
             SpirvCrossApi.spvc_compiler_create_shader_resources(compiler, out var resources).CheckResult();
 
             spvc_reflected_resource* resourceListPtr;
@@ -173,16 +145,12 @@ public unsafe struct CompilerCtx : IDisposable {
         }
         catch (Exception e) {
             string errorMessage = $"spv reflection failed: {e.Message}";
-            var lastError = SpirvCrossApi.spvc_context_get_last_error_string(context);
+            var lastError = SpirvCrossApi.spvc_context_get_last_error_string(_spvc);
             if (!string.IsNullOrEmpty(lastError)) {
                 errorMessage += $"\n spv last error: {lastError}";
             }
             throw new Exception(errorMessage, e);
         }
-    }
-
-    void ReadSamplers(List<ReflectedSampler> samplers) {
-        
     }
     
     public void Dispose() {
@@ -198,6 +166,7 @@ public unsafe struct CompilerCtx : IDisposable {
             _spvc = IntPtr.Zero;
         }
     }
+    
     
     private VkShaderStageFlags ConvertSpvExecutionModelToVkShaderStageFlags(SpvExecutionModel model) {
         return model switch {

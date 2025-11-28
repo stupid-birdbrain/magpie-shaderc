@@ -66,17 +66,17 @@ internal unsafe partial struct shaderc {
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate nint IncludeResolveFn(
-        nint user_data,
-        byte* requested_source,
+        nint userData,
+        byte* requestedSource,
         int type,
-        byte* requesting_source,
-        nuint include_depth
+        byte* requestingSource,
+        nuint includeDepth
     );
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void IncludeReleaseFn(
-        nint user_data,
-        nint include_result_ptr
+        nint userData,
+        nint includeResultPtr
     );
 
     [LibraryImport("shaderc_shared", EntryPoint = "shaderc_compile_options_set_include_callbacks")]
@@ -84,7 +84,7 @@ internal unsafe partial struct shaderc {
         nint options,
         [MarshalAs(UnmanagedType.FunctionPtr)] IncludeResolveFn resolver,
         [MarshalAs(UnmanagedType.FunctionPtr)] IncludeReleaseFn releaser,
-        nint user_data
+        nint userData
     );
 
     [StructLayout(LayoutKind.Sequential)]
