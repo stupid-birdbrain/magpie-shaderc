@@ -5,6 +5,8 @@ using Vortice.SPIRV;
 using Vortice.SpirvCross;
 using Vortice.Vulkan;
 
+using SPV = Vortice.SpirvCross.SpirvCrossApi;
+
 namespace ShaderCompilation;
 
 public enum LangKind {
@@ -39,8 +41,8 @@ public unsafe class CompilerCtx : IDisposable {
         
         _backend = backend;
         Options = new CompilerOptions();
-        SpirvCrossApi.spvc_context_create(out _spvc).CheckResult();
-        SpirvCrossApi.spvc_context_set_error_callback(_spvc, &SpirvCrossErrorCallback, 0);
+        SPV.spvc_context_create(out _spvc).CheckResult();
+        SPV.spvc_context_set_error_callback(_spvc, &SpirvCrossErrorCallback, 0);
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
@@ -80,33 +82,33 @@ public unsafe class CompilerCtx : IDisposable {
                     throw new Exception("spvc bytecode length is not a multiple of 4 bytes (uint).");
                 }
                 nuint wordCount = (nuint)spirvBytes.Length / sizeof(uint);
-                SpirvCrossApi.spvc_context_parse_spirv(_spvc, (uint*)spirvPtr, wordCount, out parsedIr).CheckResult();
+                SPV.spvc_context_parse_spirv(_spvc, (uint*)spirvPtr, wordCount, out parsedIr).CheckResult();
             }
 
-            SpirvCrossApi.spvc_context_create_compiler(_spvc, _backend, parsedIr, CaptureMode.TakeOwnership, out spvc_compiler compiler).CheckResult();
-            SpirvCrossApi.spvc_compiler_create_compiler_options(compiler, out spvc_compiler_options options).CheckResult();
+            SPV.spvc_context_create_compiler(_spvc, _backend, parsedIr, CaptureMode.TakeOwnership, out spvc_compiler compiler).CheckResult();
+            SPV.spvc_compiler_create_compiler_options(compiler, out spvc_compiler_options options).CheckResult();
 
             if (_backend == Backend.GLSL) {
-                SpirvCrossApi.spvc_compiler_options_set_uint(options, CompilerOption.GLSLVersion, 460).CheckResult();
-                SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLES, false).CheckResult();
-                SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLVulkanSemantics, true).CheckResult();
-                SpirvCrossApi.spvc_compiler_options_set_bool(options, CompilerOption.GLSLEmitUniformBufferAsPlainUniforms, false).CheckResult();
+                SPV.spvc_compiler_options_set_uint(options, CompilerOption.GLSLVersion, 460).CheckResult();
+                SPV.spvc_compiler_options_set_bool(options, CompilerOption.GLSLES, false).CheckResult();
+                SPV.spvc_compiler_options_set_bool(options, CompilerOption.GLSLVulkanSemantics, true).CheckResult();
+                SPV.spvc_compiler_options_set_bool(options, CompilerOption.GLSLEmitUniformBufferAsPlainUniforms, false).CheckResult();
             }
             else if (_backend == Backend.HLSL) {
-                SpirvCrossApi.spvc_compiler_options_set_uint(options, CompilerOption.HLSLShaderModel, 61).CheckResult();
+                SPV.spvc_compiler_options_set_uint(options, CompilerOption.HLSLShaderModel, 61).CheckResult();
             }
 
-            SpirvCrossApi.spvc_compiler_install_compiler_options(compiler, options).CheckResult();
+            SPV.spvc_compiler_install_compiler_options(compiler, options).CheckResult();
 
             byte* codePtr;
-            SpirvCrossApi.spvc_compiler_compile(compiler, &codePtr).CheckResult();
+            SPV.spvc_compiler_compile(compiler, &codePtr).CheckResult();
             string reflectedCode = Marshal.PtrToStringAnsi((IntPtr)codePtr) ?? string.Empty;
 
             ReflectedShaderData data = new() { Code = spirvBytes, ReflectedCode = reflectedCode };
 
             spvc_entry_point* entryPointsPtr;
             nuint numEntryPoints;
-            SpirvCrossApi.spvc_compiler_get_entry_points(compiler, &entryPointsPtr, &numEntryPoints).CheckResult();
+            SPV.spvc_compiler_get_entry_points(compiler, &entryPointsPtr, &numEntryPoints).CheckResult();
             
             if (numEntryPoints > 0) {
                 data.EntryPoint = Marshal.PtrToStringAnsi((IntPtr)entryPointsPtr[0].name) ?? "unknown";
@@ -115,36 +117,119 @@ public unsafe class CompilerCtx : IDisposable {
                 data.EntryPoint = "none";
             }
             
-            SpirvCrossApi.spvc_compiler_create_shader_resources(compiler, out var resources).CheckResult();
+            SPV.spvc_compiler_create_shader_resources(compiler, out var resources).CheckResult();
 
             spvc_reflected_resource* resourceListPtr;
             nuint resourceCount;
             
             List<ReflectedSampler> samplers = new();
+            List<ReflectedUniformBuffer> buffers = new();
+            List<ReflectedStorageImage> storageImages = new();
 
-            SpirvCrossApi.spvc_resources_get_resource_list_for_type(resources, ResourceType.UniformBuffer, &resourceListPtr, &resourceCount).CheckResult();
-            data.UniformBuffers = (uint)resourceCount;
+            ReadSamplers(samplers, compiler);
+            data.ReadSamplers = samplers;
+            
+            ReadUniformBuffers(buffers, compiler);
+            data.UniformBuffers = buffers;
 
-            SpirvCrossApi.spvc_resources_get_resource_list_for_type(resources, ResourceType.SampledImage, &resourceListPtr, &resourceCount).CheckResult();
+            SPV.spvc_resources_get_resource_list_for_type(resources, ResourceType.StorageImage, &resourceListPtr, &resourceCount).CheckResult();
             for (int i = 0; i < (int)resourceCount; i++) {
                 var resource = resourceListPtr[i];
                 var name = Marshal.PtrToStringAnsi((IntPtr)resource.name) ?? "unnamed";
-                uint set = SpirvCrossApi.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.DescriptorSet);
-                uint binding = SpirvCrossApi.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.Binding);
-                
-                samplers.Add(new ReflectedSampler(name, binding, set, ShaderDataType.Sampler2D));
-            }
-            data.ReadSamplers = samplers;
+                uint set = SPV.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.DescriptorSet);
+                uint binding = SPV.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.Binding);
+                spvc_type typeHandle = SPV.spvc_compiler_get_type_handle(compiler, resource.type_id);
+                var baseType = SPV.spvc_type_get_basetype(typeHandle);
+                uint vectorSize = SPV.spvc_type_get_vector_size(typeHandle);
+                uint columns = SPV.spvc_type_get_columns(typeHandle);
+                ShaderDataType dataType = DataTypeExt.SpvTypeToDataType(baseType, vectorSize, columns);
 
+                storageImages.Add(new ReflectedStorageImage(name, binding, set, dataType));
+            }
+            data.StorageImages = storageImages;
+            
             return data;
         }
         catch (Exception e) {
             string errorMessage = $"spv reflection failed: {e.Message}";
-            var lastError = SpirvCrossApi.spvc_context_get_last_error_string(_spvc);
+            var lastError = SPV.spvc_context_get_last_error_string(_spvc);
             if (!string.IsNullOrEmpty(lastError)) {
                 errorMessage += $"\n spv last error: {lastError}";
             }
             throw new Exception(errorMessage, e);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    static void ReadSamplers(List<ReflectedSampler> samplers, spvc_compiler compiler) {
+        SPV.spvc_compiler_create_shader_resources(compiler, out var resources).CheckResult();
+        SPV.spvc_resources_get_resource_list_for_type(resources, ResourceType.SampledImage, out var resourceList, out var count).CheckResult();
+
+        var newResources = new Span<spvc_reflected_resource>(resourceList, (int)count);
+        foreach (var resource in newResources) {
+            var name = Marshal.PtrToStringAnsi((IntPtr)resource.name) ?? "unnamed";
+            uint set = SPV.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.DescriptorSet);
+            uint binding = SPV.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.Binding);
+            var type = SPV.spvc_compiler_get_type_handle(compiler, resource.type_id);
+            var baseType = SPV.spvc_type_get_basetype(type);
+            
+            ReflectedSampler sampler = default;
+            
+            switch(baseType) {
+                case Basetype.SampledImage: sampler = new ReflectedSampler(name, binding, set, ShaderDataType.Sampler2D);
+                    break;
+            }
+            
+            samplers.Add(sampler);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    static void ReadUniformBuffers(List<ReflectedUniformBuffer> buffers, spvc_compiler compiler) {
+        SPV.spvc_compiler_create_shader_resources(compiler, out var resources).CheckResult();
+        SPV.spvc_resources_get_resource_list_for_type(resources, ResourceType.UniformBuffer, out var resourceList, out var count).CheckResult();
+        
+        var newResources = new Span<spvc_reflected_resource>(resourceList, (int)count);
+        foreach(var resource in newResources) {
+            var name = Marshal.PtrToStringAnsi((IntPtr)resource.name) ?? "unnamed";
+            uint set = SPV.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.DescriptorSet);
+            uint binding = SPV.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.Binding);
+            var type = SPV.spvc_compiler_get_type_handle(compiler, resource.type_id);
+            var baseType = SPV.spvc_type_get_basetype(type);
+
+            if(baseType == Basetype.Struct) {
+                List<ReflectedBufferMember> members = new();
+                uint baseTypeId = SPV.spvc_type_get_base_type_id(type);
+                string baseTypeName = SPV.spvc_compiler_get_name(compiler, baseTypeId) ?? string.Empty;
+                uint memberCount = SPV.spvc_type_get_num_member_types(type);
+                
+                uint structTypeId = resource.type_id;
+
+                for(uint m = 0; m < memberCount; m++) {
+                    uint memberTypeId = SPV.spvc_type_get_member_type(type, m);
+                    var memberTypeHandle = SPV.spvc_compiler_get_type_handle(compiler, memberTypeId);
+
+                    var membername = Marshal.PtrToStringAnsi((IntPtr)resource.name) ?? "unnamed";
+
+                    uint offset = SPV.spvc_compiler_get_member_decoration(compiler, structTypeId, m, SpvDecoration.Offset);
+
+                    uint vectorSize = SPV.spvc_type_get_vector_size(memberTypeHandle);
+                    uint columns = SPV.spvc_type_get_columns(memberTypeHandle);
+                    var memberBaseType = SPV.spvc_type_get_basetype(memberTypeHandle);
+                    var dataType = DataTypeExt.SpvTypeToDataType(memberBaseType, vectorSize, columns);
+
+                    nuint memberSize;
+                    SPV.spvc_compiler_get_declared_struct_member_size(compiler, type, m, &memberSize).CheckResult();
+
+                    members.Add(new ReflectedBufferMember(membername, dataType, offset, (uint)memberSize));
+                }
+
+                nuint bufferTypeSize;
+                SPV.spvc_compiler_get_declared_struct_size(compiler, type, &bufferTypeSize).CheckResult();
+                uint bufferSize = (uint)bufferTypeSize;
+
+                buffers.Add(new ReflectedUniformBuffer(name, binding, set, members, bufferSize));
+            }
         }
     }
     
@@ -157,7 +242,7 @@ public unsafe class CompilerCtx : IDisposable {
         }
         if (_spvc != IntPtr.Zero)
         {
-            SpirvCrossApi.spvc_context_destroy(_spvc);
+            SPV.spvc_context_destroy(_spvc);
             _spvc = IntPtr.Zero;
         }
     }
