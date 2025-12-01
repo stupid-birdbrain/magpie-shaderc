@@ -29,8 +29,6 @@ public unsafe class CompilerCtx : IDisposable {
     
     public CompilerOptions Options;
 
-    private spvc_compiler _compiler;
-
     private readonly Backend _backend;
 
     public CompilerCtx(Backend backend) {
@@ -125,12 +123,16 @@ public unsafe class CompilerCtx : IDisposable {
             List<ReflectedSampler> samplers = new();
             List<ReflectedUniformBuffer> buffers = new();
             List<ReflectedStorageImage> storageImages = new();
+            List<ReflectedPushConstantBlock> pushConstants = new();
 
             ReadSamplers(samplers, compiler);
-            data.ReadSamplers = samplers;
+            data.Samplers = samplers;
             
             ReadUniformBuffers(buffers, compiler);
             data.UniformBuffers = buffers;
+            
+            ReadPushConstants(pushConstants, compiler);
+            data.PushConstants = pushConstants;
 
             SPV.spvc_resources_get_resource_list_for_type(resources, ResourceType.StorageImage, &resourceListPtr, &resourceCount).CheckResult();
             for (int i = 0; i < (int)resourceCount; i++) {
@@ -209,7 +211,8 @@ public unsafe class CompilerCtx : IDisposable {
                     uint memberTypeId = SPV.spvc_type_get_member_type(type, m);
                     var memberTypeHandle = SPV.spvc_compiler_get_type_handle(compiler, memberTypeId);
 
-                    var membername = Marshal.PtrToStringAnsi((IntPtr)resource.name) ?? "unnamed";
+                    byte* mName = SPV.spvc_compiler_get_member_name(compiler, baseTypeId, m);
+                    var realName = Marshal.PtrToStringUTF8((IntPtr)mName);
 
                     uint offset = SPV.spvc_compiler_get_member_decoration(compiler, structTypeId, m, SpvDecoration.Offset);
 
@@ -221,7 +224,7 @@ public unsafe class CompilerCtx : IDisposable {
                     nuint memberSize;
                     SPV.spvc_compiler_get_declared_struct_member_size(compiler, type, m, &memberSize).CheckResult();
 
-                    members.Add(new ReflectedBufferMember(membername, dataType, offset, (uint)memberSize));
+                    members.Add(new ReflectedBufferMember(realName, dataType, offset, (uint)memberSize));
                 }
 
                 nuint bufferTypeSize;
@@ -233,15 +236,67 @@ public unsafe class CompilerCtx : IDisposable {
         }
     }
     
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    public void ReadPushConstants(List<ReflectedPushConstantBlock> list,  spvc_compiler compiler) {
+        SPV.spvc_compiler_create_shader_resources(compiler, out var resources).CheckResult();
+        
+        SPV.spvc_resources_get_resource_list_for_type(resources, ResourceType.PushConstant, out spvc_reflected_resource* resourceList, out nuint resourceCount);
+        Span<spvc_reflected_resource> resourcesSpan = new(resourceList, (int)resourceCount);
+        spvc_buffer_range** ranges = stackalloc spvc_buffer_range*[16];
+        
+        foreach (spvc_reflected_resource resource in resourcesSpan) {
+            string propertyName = Marshal.PtrToStringAnsi((IntPtr)resource.name) ?? "unnamed_push_constants_block";
+            spvc_type type = SPV.spvc_compiler_get_type_handle(compiler, resource.type_id);
+            Basetype baseType = SPV.spvc_type_get_basetype(type);
+
+            if (baseType == Basetype.Struct) {
+                List<ReflectedPushConstantMember> members = new();
+                nuint memberCount = SPV.spvc_type_get_num_member_types(type);
+                uint baseTypeId = SPV.spvc_type_get_base_type_id(type);
+                uint structTypeId = resource.type_id;
+                
+                nuint blockSize;
+                SPV.spvc_compiler_get_declared_struct_size(compiler, type, &blockSize).CheckResult();
+
+                spvc_buffer_range* activeRangesPtr;
+                nuint numActiveRanges;
+
+                SPV.spvc_compiler_get_active_buffer_ranges(compiler, resource.id, &activeRangesPtr, &numActiveRanges).CheckResult();
+
+                for (uint m = 0; m < memberCount; m++) {
+                    uint memberTypeId = SPV.spvc_type_get_member_type(type, m);
+                    spvc_type memberTypeHandle = SPV.spvc_compiler_get_type_handle(compiler, memberTypeId);
+
+                    uint offset = SPV.spvc_compiler_get_member_decoration(compiler, resource.type_id, m, SpvDecoration.Offset);
+
+                    uint vectorSize = SPV.spvc_type_get_vector_size(memberTypeHandle);
+                    uint columns = SPV.spvc_type_get_columns(memberTypeHandle);
+                    Basetype memberBaseType = SPV.spvc_type_get_basetype(memberTypeHandle);
+                    ShaderDataType dataType = DataTypeExt.SpvTypeToDataType(memberBaseType, vectorSize, columns);
+                    
+                    var membername = Marshal.PtrToStringAnsi((IntPtr)resource.name) ?? "unnamed";
+
+                    nuint memberSize;
+                    SPV.spvc_compiler_get_declared_struct_member_size(compiler, type, m, &memberSize).CheckResult();
+                    
+                    byte* mName = SPV.spvc_compiler_get_member_name(compiler, baseTypeId, m);
+                    var realName = Marshal.PtrToStringUTF8((IntPtr)mName);
+
+                    members.Add(new ReflectedPushConstantMember(realName, dataType, offset, (uint)memberSize));
+                }
+                
+                list.Add(new ReflectedPushConstantBlock(propertyName, members, (uint)blockSize));
+            }
+        }
+    }
+
     public void Dispose() {
         Options.Dispose();
-        if (_compilerHandle != IntPtr.Zero)
-        {
+        if (_compilerHandle != IntPtr.Zero) {
             shaderc.shaderc_compiler_release(_compilerHandle);
             _compilerHandle = IntPtr.Zero;
         }
-        if (_spvc != IntPtr.Zero)
-        {
+        if (_spvc != IntPtr.Zero) {
             SPV.spvc_context_destroy(_spvc);
             _spvc = IntPtr.Zero;
         }
