@@ -128,27 +128,14 @@ public unsafe class CompilerCtx : IDisposable {
             ReadSamplers(samplers, compiler);
             data.Samplers = samplers;
             
+            ReadStorageImages(storageImages, compiler);
+            data.StorageImages = storageImages;
+            
             ReadUniformBuffers(buffers, compiler);
             data.UniformBuffers = buffers;
             
             ReadPushConstants(pushConstants, compiler);
             data.PushConstants = pushConstants;
-
-            SPV.spvc_resources_get_resource_list_for_type(resources, ResourceType.StorageImage, &resourceListPtr, &resourceCount).CheckResult();
-            for (int i = 0; i < (int)resourceCount; i++) {
-                var resource = resourceListPtr[i];
-                var name = Marshal.PtrToStringAnsi((IntPtr)resource.name) ?? "unnamed";
-                uint set = SPV.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.DescriptorSet);
-                uint binding = SPV.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.Binding);
-                spvc_type typeHandle = SPV.spvc_compiler_get_type_handle(compiler, resource.type_id);
-                var baseType = SPV.spvc_type_get_basetype(typeHandle);
-                uint vectorSize = SPV.spvc_type_get_vector_size(typeHandle);
-                uint columns = SPV.spvc_type_get_columns(typeHandle);
-                ShaderDataType dataType = DataTypeExt.SpvTypeToDataType(baseType, vectorSize, columns);
-
-                storageImages.Add(new ReflectedStorageImage(name, binding, set, dataType));
-            }
-            data.StorageImages = storageImages;
             
             return data;
         }
@@ -159,6 +146,25 @@ public unsafe class CompilerCtx : IDisposable {
                 errorMessage += $"\n spv last error: {lastError}";
             }
             throw new Exception(errorMessage, e);
+        }
+    }
+
+    static void ReadStorageImages(List<ReflectedStorageImage> images, spvc_compiler compiler) {
+        SPV.spvc_compiler_create_shader_resources(compiler, out var resources).CheckResult();
+        SPV.spvc_resources_get_resource_list_for_type(resources, ResourceType.StorageImage, out var resourceList, out var count).CheckResult();
+        var newResources = new Span<spvc_reflected_resource>(resourceList, (int)count);
+
+        foreach(var resource in newResources) {
+            var name = Marshal.PtrToStringAnsi((IntPtr)resource.name) ?? "unnamed";
+            uint set = SPV.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.DescriptorSet);
+            uint binding = SPV.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.Binding);
+            spvc_type typeHandle = SPV.spvc_compiler_get_type_handle(compiler, resource.type_id);
+            var baseType = SPV.spvc_type_get_basetype(typeHandle);
+            uint vectorSize = SPV.spvc_type_get_vector_size(typeHandle);
+            uint columns = SPV.spvc_type_get_columns(typeHandle);
+            ShaderDataType dataType = DataTypeExt.SpvTypeToDataType(baseType, vectorSize, columns);
+
+            images.Add(new ReflectedStorageImage(name, binding, set, dataType));
         }
     }
 
@@ -274,7 +280,7 @@ public unsafe class CompilerCtx : IDisposable {
                     Basetype memberBaseType = SPV.spvc_type_get_basetype(memberTypeHandle);
                     ShaderDataType dataType = DataTypeExt.SpvTypeToDataType(memberBaseType, vectorSize, columns);
                     
-                    var membername = Marshal.PtrToStringAnsi((IntPtr)resource.name) ?? "unnamed";
+                    var memberName = Marshal.PtrToStringAnsi((IntPtr)resource.name) ?? "unnamed";
 
                     nuint memberSize;
                     SPV.spvc_compiler_get_declared_struct_member_size(compiler, type, m, &memberSize).CheckResult();

@@ -15,9 +15,9 @@ public struct ReflectedShaderData {
 
     public override string ToString() {
         return $"entry: {EntryPoint}\n" +
+               $"samplers: {Samplers.Count}\n" +
                $"ubuffers: {UniformBuffers.Count}\n" +
                $"pushconstants: {PushConstants.Count}\n" +
-               $"simages: {StorageImages.Count}\n" +
-               $"reflected code:\n{(ReflectedCode)}";
+               $"simages: {StorageImages.Count}\n";
     }
 }
