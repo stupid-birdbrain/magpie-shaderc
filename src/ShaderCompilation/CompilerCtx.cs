@@ -116,14 +116,12 @@ public unsafe class CompilerCtx : IDisposable {
             }
             
             SPV.spvc_compiler_create_shader_resources(compiler, out var resources).CheckResult();
-
-            spvc_reflected_resource* resourceListPtr;
-            nuint resourceCount;
             
             List<ReflectedSampler> samplers = new();
             List<ReflectedUniformBuffer> buffers = new();
             List<ReflectedStorageImage> storageImages = new();
             List<ReflectedPushConstantBlock> pushConstants = new();
+            List<ReflectedStorageBufferBlock> ssbos = new();
 
             ReadSamplers(samplers, compiler);
             data.Samplers = samplers;
@@ -136,6 +134,9 @@ public unsafe class CompilerCtx : IDisposable {
             
             ReadPushConstants(pushConstants, compiler);
             data.PushConstants = pushConstants;
+            
+            ReadStorageBuffers(ssbos, compiler);
+            data.StorageBuffers = ssbos;
             
             return data;
         }
@@ -208,7 +209,6 @@ public unsafe class CompilerCtx : IDisposable {
             if(baseType == Basetype.Struct) {
                 List<ReflectedBufferMember> members = new();
                 uint baseTypeId = SPV.spvc_type_get_base_type_id(type);
-                string baseTypeName = SPV.spvc_compiler_get_name(compiler, baseTypeId) ?? string.Empty;
                 uint memberCount = SPV.spvc_type_get_num_member_types(type);
                 
                 uint structTypeId = resource.type_id;
@@ -243,7 +243,7 @@ public unsafe class CompilerCtx : IDisposable {
     }
     
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-    public void ReadPushConstants(List<ReflectedPushConstantBlock> list,  spvc_compiler compiler) {
+    static void ReadPushConstants(List<ReflectedPushConstantBlock> list,  spvc_compiler compiler) {
         SPV.spvc_compiler_create_shader_resources(compiler, out var resources).CheckResult();
         
         SPV.spvc_resources_get_resource_list_for_type(resources, ResourceType.PushConstant, out spvc_reflected_resource* resourceList, out nuint resourceCount);
@@ -296,6 +296,69 @@ public unsafe class CompilerCtx : IDisposable {
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    static void ReadStorageBuffers(List<ReflectedStorageBufferBlock> buffers, spvc_compiler compiler) {
+        SPV.spvc_compiler_create_shader_resources(compiler, out var resources).CheckResult();
+        SPV.spvc_resources_get_resource_list_for_type(resources, ResourceType.StorageBuffer, out spvc_reflected_resource* resourceList, out nuint resourceCount).CheckResult();
+        
+        var newResources = new Span<spvc_reflected_resource>(resourceList, (int)resourceCount);
+        foreach(var resource in newResources) {
+            var variableName = Marshal.PtrToStringAnsi((IntPtr)resource.name) ?? "unnamed_ssbo_var";
+            var structTypeName = SPV.spvc_compiler_get_name(compiler, resource.type_id) ?? "unnamed_ssbo_type";
+
+            uint set = SPV.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.DescriptorSet);
+            uint binding = SPV.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.Binding);
+            
+            spvc_type type = SPV.spvc_compiler_get_type_handle(compiler, resource.type_id);
+            var baseType = SPV.spvc_type_get_basetype(type);
+
+            if(baseType == Basetype.Struct) {
+                List<ReflectedStorageBufferMember> members = new();
+                
+                uint structDefinitionId = SPV.spvc_type_get_base_type_id(type);
+                
+                uint memberCount = SPV.spvc_type_get_num_member_types(type);
+
+                nuint blockSize;
+                SPV.spvc_compiler_get_declared_struct_size(compiler, type, &blockSize).CheckResult();
+
+                ReflectedStorageBufferBlock.SsboFlags flags = ReflectedStorageBufferBlock.SsboFlags.ReadWrite;
+                if (SPV.spvc_compiler_has_decoration(compiler, resource.id, SpvDecoration.NonReadable)) {
+                    flags = ReflectedStorageBufferBlock.SsboFlags.WriteOnly;
+                }
+                if (SPV.spvc_compiler_has_decoration(compiler, resource.id, SpvDecoration.NonWritable)) {
+                    flags = ReflectedStorageBufferBlock.SsboFlags.ReadOnly;
+                }
+
+                for(uint m = 0; m < memberCount; m++) {
+                    uint memberTypeId = SPV.spvc_type_get_member_type(type, m);
+                    var memberTypeHandle = SPV.spvc_compiler_get_type_handle(compiler, memberTypeId);
+
+                    byte* memberNamePtr = SPV.spvc_compiler_get_member_name(compiler, structDefinitionId, m);
+                    string memberName = Marshal.PtrToStringUTF8((IntPtr)memberNamePtr) ?? $"member_{m}";
+
+                    uint offset = SPV.spvc_compiler_get_member_decoration(compiler, structDefinitionId, m, SpvDecoration.Offset);
+
+                    uint vectorSize = SPV.spvc_type_get_vector_size(memberTypeHandle);
+                    uint columns = SPV.spvc_type_get_columns(memberTypeHandle);
+                    Basetype memberBaseType = SPV.spvc_type_get_basetype(memberTypeHandle);
+                    ShaderDataType dataType = DataTypeExt.SpvTypeToDataType(memberBaseType, vectorSize, columns);
+
+                    nuint memberSize;
+                    SPV.spvc_compiler_get_declared_struct_member_size(compiler, type, m, &memberSize).CheckResult();
+                    
+                    uint arraySize = 1;
+                    if (SPV.spvc_type_get_num_array_dimensions(memberTypeHandle) > 0) {
+                        arraySize = SPV.spvc_type_get_array_dimension(memberTypeHandle, 0);
+                    }
+
+                    members.Add(new ReflectedStorageBufferMember(memberName, dataType, offset, (uint)memberSize, arraySize));
+                }
+                buffers.Add(new ReflectedStorageBufferBlock(variableName, structTypeName, binding, set, (uint)blockSize, flags, members));
+            }
+        }
+    }
+
     public void Dispose() {
         Options.Dispose();
         if (_compilerHandle != IntPtr.Zero) {
@@ -307,7 +370,6 @@ public unsafe class CompilerCtx : IDisposable {
             _spvc = IntPtr.Zero;
         }
     }
-    
     
     private VkShaderStageFlags ConvertSpvExecutionModelToVkShaderStageFlags(SpvExecutionModel model) {
         return model switch {

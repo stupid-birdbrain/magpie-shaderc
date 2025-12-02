@@ -12,12 +12,14 @@ public struct ReflectedShaderData {
     public IReadOnlyList<ReflectedStorageImage> StorageImages;
     public IReadOnlyList<ReflectedUniformBuffer> UniformBuffers;
     public IReadOnlyList<ReflectedPushConstantBlock> PushConstants;
+    public IReadOnlyList<ReflectedStorageBufferBlock> StorageBuffers;
 
     public override string ToString() {
         return $"entry: {EntryPoint}\n" +
                $"samplers: {Samplers.Count}\n" +
                $"ubuffers: {UniformBuffers.Count}\n" +
                $"pushconstants: {PushConstants.Count}\n" +
-               $"simages: {StorageImages.Count}\n";
+               $"simages: {StorageImages.Count}\n" +
+               $"sbuffers: {StorageBuffers.Count}\n";
     }
 }
