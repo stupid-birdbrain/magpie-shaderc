@@ -13,10 +13,12 @@ public struct ReflectedShaderData {
     public IReadOnlyList<ReflectedUniformBuffer> UniformBuffers;
     public IReadOnlyList<ReflectedPushConstantBlock> PushConstants;
     public IReadOnlyList<ReflectedStorageBufferBlock> StorageBuffers;
+    public IReadOnlyList<ReflectedVertexInput> VertexInputs;
 
     public override string ToString() {
         return $"entry: {EntryPoint}\n" +
                $"samplers: {Samplers.Count}\n" +
+               $"vertexinputs: {VertexInputs.Count}\n" +
                $"ubuffers: {UniformBuffers.Count}\n" +
                $"pushconstants: {PushConstants.Count}\n" +
                $"simages: {StorageImages.Count}\n" +

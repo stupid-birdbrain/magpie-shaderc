@@ -122,6 +122,7 @@ public unsafe class CompilerCtx : IDisposable {
             List<ReflectedStorageImage> storageImages = new();
             List<ReflectedPushConstantBlock> pushConstants = new();
             List<ReflectedStorageBufferBlock> ssbos = new();
+            List<ReflectedVertexInput> vertexInputs = new();
 
             ReadSamplers(samplers, compiler);
             data.Samplers = samplers;
@@ -137,6 +138,9 @@ public unsafe class CompilerCtx : IDisposable {
             
             ReadStorageBuffers(ssbos, compiler);
             data.StorageBuffers = ssbos;
+            
+            ReadVertexInputs(vertexInputs, compiler);
+            data.VertexInputs = vertexInputs;
             
             return data;
         }
@@ -358,8 +362,36 @@ public unsafe class CompilerCtx : IDisposable {
             }
         }
     }
+    
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    static void ReadVertexInputs(List<ReflectedVertexInput> inputs, spvc_compiler compiler) {
+        SPV.spvc_compiler_create_shader_resources(compiler, out var resources).CheckResult();
+        SPV.spvc_resources_get_resource_list_for_type(resources, ResourceType.StageInput, out spvc_reflected_resource* resourceList, out nuint resourceCount).CheckResult();
+
+        var newResources = new Span<spvc_reflected_resource>(resourceList, (int)resourceCount);
+        foreach(var resource in newResources) {
+            var name = Marshal.PtrToStringAnsi((IntPtr)resource.name) ?? "unnamed_input";
+            
+            uint location = SPV.spvc_compiler_get_decoration(compiler, resource.id, SpvDecoration.Location);
+            
+            spvc_type typeHandle = SPV.spvc_compiler_get_type_handle(compiler, resource.type_id);
+            var baseType = SPV.spvc_type_get_basetype(typeHandle);
+            uint vectorSize = SPV.spvc_type_get_vector_size(typeHandle);
+            uint columns = SPV.spvc_type_get_columns(typeHandle);
+            ShaderDataType dataType = DataTypeExt.SpvTypeToDataType(baseType, vectorSize, columns);
+
+            uint arraySize = 1;
+            if (SPV.spvc_type_get_num_array_dimensions(typeHandle) > 0) {
+                arraySize = SPV.spvc_type_get_array_dimension(typeHandle, 0);
+            }
+
+            inputs.Add(new ReflectedVertexInput(name, location, dataType, arraySize));
+        }
+    }
 
     public void Dispose() {
+        GC.SuppressFinalize(this);
+        
         Options.Dispose();
         if (_compilerHandle != IntPtr.Zero) {
             shaderc.shaderc_compiler_release(_compilerHandle);
